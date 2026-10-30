@@ -1,23 +1,91 @@
 
-# 🧠 Retrieval-Augmented Generation (RAG) Pipeline  
-A lightweight RAG system built with **ChromaDB**, **Ollama**, and a custom Python pipeline. This project implements ingestion, retrieval, prompt construction, grounded generation, and testing over a local document collection.
+# 🧠 Guardrailed Retrieval-Augmented Generation (RAG) Pipeline  
+A reliable, production‑ready RAG system built with **ChromaDB**, **Ollama**, and Python.  
+This version includes **all four required guardrails**: distance filtering, confidence scoring, strengthened system prompt, and structured responses.
 
 ---
 
 ## 📌 Overview
 
-This project demonstrates a complete RAG workflow:
+This project extends the basic RAG pipeline from Lesson 3 by adding **robust guardrails** that prevent hallucinations, enforce grounding, and provide confidence scoring. These guardrails are required for the module’s final project (Containerized RAG Assistant).
 
-1. **Ingest** a folder of text documents  
-2. **Chunk** them by paragraph  
-3. **Store** them in a persistent ChromaDB collection  
-4. **Retrieve** the most relevant chunks for a user query  
-5. **Generate** an answer using Ollama, grounded strictly in retrieved context  
-6. **Cite sources** for every fact used  
-7. **Gracefully refuse** when the answer is not in the documents  
-8. **Run three required test queries** to validate behavior  
+The pipeline performs:
 
-This pipeline forms the foundation for the module’s larger project (FastAPI + Streamlit + Docker).
+1. **Document ingestion**  
+2. **Paragraph‑level chunking**  
+3. **Embedding storage in ChromaDB**  
+4. **Semantic retrieval with distance filtering**  
+5. **Guardrailed generation using Ollama**  
+6. **Structured response output**  
+7. **Confidence scoring**  
+8. **Testing across four query types**
+
+---
+
+## 🛡️ Guardrails Implemented
+
+### **Guardrail 1 — Distance Threshold Filtering**
+- Only chunks with distance ≤ `dt_threshold` (default: **1.0**) are used.  
+- If no chunks pass the filter, the pipeline returns:
+
+```json
+{
+  "answer": "I don’t know.",
+  "sources": [],
+  "confidence": "low",
+  "chunks_retrieved": []
+}
+```
+
+This prevents irrelevant context from influencing the model.
+
+---
+
+### **Guardrail 2 — Confidence Levels**
+Confidence is computed from the **best (lowest) distance**:
+
+| Best Distance | Confidence |
+|--------------|------------|
+| `< 0.5`      | **high**   |
+| `< 1.0`      | **medium** |
+| `>= 1.0`     | **low**    |
+
+This gives downstream systems (FastAPI, Streamlit) a way to judge answer reliability.
+
+---
+
+### **Guardrail 3 — Strengthened System Prompt**
+The system prompt explicitly instructs the model to:
+
+- Use **only** retrieved context  
+- **Never** make up information  
+- Say **“I don’t know”** when unsure  
+- Always cite filename + chunk index  
+- Never invent citations  
+- Keep answers concise  
+- Produce output compatible with structured responses  
+
+This prevents hallucinations and enforces strict grounding.
+
+---
+
+### **Guardrail 4 — Structured Response Dictionary**
+Every call to `rag_query()` returns:
+
+```json
+{
+  "answer": "...",
+  "sources": [...],
+  "confidence": "...",
+  "chunks_retrieved": [...]
+}
+```
+
+This makes the pipeline easy to integrate into:
+
+- FastAPI endpoints  
+- Streamlit UIs  
+- Dockerized microservices  
 
 ---
 
@@ -32,106 +100,93 @@ docs/
     sql_databases.txt
     embeddings_overview.txt
     llm_behavior.txt
-rag_db/   (auto-created by ChromaDB)
+rag_db/   (persistent ChromaDB storage)
 ```
 
 ---
 
-## ⚙️ Features
+## ⚙️ How the Pipeline Works
 
-### **Document Ingestion**
+### **1. Ingestion**
 - Loads `.txt` and `.md` files  
-- Splits content by paragraphs  
-- Stores chunks with metadata (filename + chunk index)  
-- Persists embeddings in ChromaDB  
+- Splits into paragraphs  
+- Stores chunks with metadata  
+- Embeds and persists them in ChromaDB  
 
-### **Semantic Retrieval**
-- Queries ChromaDB for top‑N relevant chunks  
-- Sorts results by distance  
-- Displays retrieved chunks before answering  
+### **2. Retrieval**
+- Queries ChromaDB using cosine similarity  
+- Sorts by distance  
+- Applies threshold filtering  
 
-### **RAG Prompt Construction**
-- Injects retrieved context into the system prompt  
-- Includes strict grounding rules:
-  - Use ONLY retrieved context  
-  - Say *“I don’t know”* if answer is not present  
-  - Cite filename + chunk index  
-  - No outside knowledge  
-  - No invented citations  
+### **3. Prompt Construction**
+- Injects retrieved chunks into the system prompt  
+- Includes guardrail instructions  
+- Adds source metadata  
 
-### **Grounded Generation**
-- Calls Ollama’s `/api/chat` endpoint  
-- Supports streaming output  
-- Handles:
-  - Connection errors  
-  - Timeouts  
-  - Malformed responses  
-  - Non‑200 status codes  
-
-### **Interactive Query Function**
-- Runs retrieval → prompt building → generation  
-- Prints timing  
-- Returns grounded answer  
+### **4. Guardrailed Generation**
+- Calls Ollama’s chat API  
+- Produces grounded answers  
+- Returns structured response  
 
 ---
 
-## 🧪 Testing (Required by Assignment)
+## 🧪 Testing (All 4 Required Queries)
 
-The project includes three test queries demonstrating correct RAG behavior:
+The pipeline is tested with:
 
-### **1. Answerable Question**
-**“What does it mean for an API to be stateless?”**  
-Expected:  
-- Correct grounded answer  
-- Citations from `api_basics.txt`  
+### **1. In‑scope**
+A question directly answered by the documents.
 
-### **2. Related but Not Directly Answered**
-**“Does FastAPI automatically connect to a SQL database?”**  
-Expected:  
-- Retrieved chunks from FastAPI + SQL docs  
-- Model responds: **“I don’t know.”**  
-- Citations included  
+### **2. Partially in‑scope**
+Related to the domain but not explicitly answered.
 
-### **3. Outside the Scope**
-**“How do airplanes generate lift?”**  
-Expected:  
-- Irrelevant chunks retrieved  
-- Model responds: **“I don’t know.”**  
-- Citations included  
+### **3. Out‑of‑scope**
+Completely unrelated to the documents.
 
-These tests confirm that the pipeline handles:
+### **4. Ambiguous**
+Lacks clear meaning or context.
 
-- In-domain answers  
-- Partial-domain questions  
-- Out-of-domain questions  
+Each test prints the **structured response dictionary**, including:
 
-Exactly as a proper RAG system should.
+- Answer  
+- Sources  
+- Confidence  
+- Retrieved chunks  
 
 ---
 
 ## 🚀 Running the Pipeline
 
-1. Start Ollama:
+Start Ollama:
 
 ```
 ollama serve
 ```
 
-2. Run the script:
+Run the script:
 
 ```
 python my_rag.py
 ```
 
-3. View the printed results for all three test queries.
+View the structured responses printed for all four test queries.
 
 ---
 
 ## 🎯 Purpose
 
-This project builds the core RAG logic you will later wrap with:
+This guardrailed RAG pipeline is designed to be:
 
-- **FastAPI** (backend API)  
-- **Streamlit** (frontend UI)  
-- **Docker** (deployment)  
+- **Reliable**  
+- **Grounded**  
+- **Non‑hallucinatory**  
+- **Production‑ready**
+
+It forms the foundation for your upcoming:
+
+- FastAPI backend  
+- Streamlit frontend  
+- Docker deployment  
+
+By implementing guardrails now, your final project becomes significantly easier.
 
