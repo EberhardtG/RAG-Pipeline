@@ -6,6 +6,12 @@ import time
 
 OLLAMA_URL = "http://localhost:11434"
 MODEL = "llama3.2:1b"  # Adjust based on your downloaded model
+client = chromadb.PersistentClient(path="rag_db")
+collection = client.get_or_create_collection(
+    "my_rag_collection",
+    configuration={"hnsw": {"space": "cosine"}}
+)
+
 
 # --- Step 1: Ingestion ---
 
@@ -69,15 +75,17 @@ def retrieve(collection, query, n_results=3):
 
 # --- Step 3: Prompt Building ---
 
-SYSTEM_PROMPT = """You are a retrieval-augmented assistant. Follow these rules:
+SYSTEM_PROMPT = """You are a guardrailed retrieval‑augmented assistant. Follow these rules exactly:
 
-1. Use ONLY the retrieved context provided to you.
-2. If the answer is not in the context, say “I don’t know.”
-3. Cite your sources by listing the filename and chunk index for every fact you use.
-4. Do not use outside knowledge or make assumptions.
-5. Do not invent citations. Only cite chunks that were actually retrieved.
-6. Keep your answer concise and factual.
-7. After your answer, include a “Sources:” section listing the chunks you used.
+1. Use ONLY the retrieved context provided to you. Never rely on outside knowledge.
+2. If the answer is not fully supported by the context, say “I don’t know.”
+3. Never make up information, details, explanations, or assumptions.
+4. Cite your sources by listing the filename and chunk index for every fact you use.
+5. Do NOT invent citations. Only cite chunks that were actually retrieved.
+6. Keep your answer concise, factual, and grounded.
+7. Your answer will be placed into a structured response dictionary. Do NOT include extra commentary.
+8. After your answer, include a “Sources:” section listing the chunks you used.
+9. If no chunks are relevant, respond only with: “I don’t know.” and an empty Sources list.
 """
 
 
@@ -134,56 +142,83 @@ def generate(messages, stream=False):
         return "ERROR: Cannot connect to Ollama. Is it running? (ollama serve)"
 # --- Step 5: The RAG Function ---
 
-def rag_query(collection, question, n_results=3, stream=True):
-    """Complete RAG pipeline: retrieve + build prompt + generate."""
+def rag_query(collection, question, n_results=3, stream=True, dt_threshold=1.0):
     print(f"\n{'='*60}")
     print(f"Question: {question}")
     print(f"{'='*60}")
 
     # Retrieve
-    chunks = retrieve(collection, question, n_results)
+    retrieved = retrieve(collection, question, n_results)
+    chunks = [c for c in retrieved if c["distance"] <= dt_threshold]
+
     print(f"\nRetrieved {len(chunks)} chunks:")
     for i, chunk in enumerate(chunks):
         print(f"  [{i+1}] (dist: {chunk['distance']:.4f}) {chunk['metadata']['source']}")
 
+    # Guardrail: no relevant chunks
     if len(chunks) == 0:
-        return "No relevant chunks found. Try rephrasing your question."
+        return {
+            "answer": "I dont know.",
+            "sources": [],
+            "confidence": "low",
+            "chunks_retrieved": []
+        }
 
     # Build prompt
     messages = build_messages(question, chunks)
 
     # Generate
-    print(f"\nAnswer (streaming):\\n")
+    print(f"\nAnswer (streaming):\n")
     start = time.time()
     answer = generate(messages, stream=stream)
     elapsed = time.time() - start
     print(f"\n[Generated in {elapsed:.1f}s]")
 
-    return answer
+    # Confidence scoring
+    best_dist = chunks[0]["distance"]
+    if best_dist < 0.5:
+        confidence = "high"
+    elif best_dist < 1.0:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    # Structured response
+    return {
+        "answer": answer,
+        "sources": [c["metadata"] for c in chunks],
+        "confidence": confidence,
+        "chunks_retrieved": chunks
+    }
 
 #---Testing Questions--- 
 
 
-# --- Initialize ChromaDB ---
-client = chromadb.PersistentClient(path="rag_db")
-collection = client.get_or_create_collection("my_rag_collection")
 
 # --- Ingest documents ---
 num_chunks = ingest(collection, "docs")
 print(f"Ingested {num_chunks} chunks.")
 
-print("\n" + "=" * 60)
-print("TEST 1: Answerable question")
-print("=" * 60)
-rag_query(collection, "What does it mean for an API to be stateless?")
+# --- Testing Guardrailed RAG Pipeline ---
 
-print("\n" + "=" * 60)
-print("TEST 2: Related but not directly answered")
-print("=" * 60)
-rag_query(collection, "Does FastAPI automatically connect to a SQL database?")
+test_queries = [
+    ("In-scope", "What does it mean for an API to be stateless?"),
+    ("Partially in-scope", "Does FastAPI automatically connect to a SQL database?"),
+    ("Out-of-scope", "How do airplanes generate lift?"),
+    ("Ambiguous", "Can you tell me more about that thing we talked about earlier?")
+]
 
-print("\n" + "=" * 60)
-print("TEST 3: Outside the scope")
-print("=" * 60)
-rag_query(collection, "How do airplanes generate lift?")
+print("\n" + "="*60)
+print("RUNNING 4 GUARDRAILED RAG TESTS")
+print("="*60)
 
+for label, query in test_queries:
+    print("\n" + "-"*60)
+    print(f"TEST: {label}")
+    print("-"*60)
+
+    result = rag_query(collection, query, n_results=3, stream=False, dt_threshold=1.0)
+
+    # Print structured response dictionary
+    print("\nStructured Response:")
+    print(json.dumps(result, indent=4))
